@@ -10,7 +10,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
-#include "driver/uart.h"
 #include "esp_log.h"
 #include "led_strip.h"
 #include "sdkconfig.h"
@@ -25,37 +24,83 @@ static const char *TAG = "example";
 static uint8_t s_led_state = 0;
 
 #ifdef CONFIG_BLINK_LED_RMT
-
-static led_strip_handle_t led_strip;
+const uint8_t palette[22][3] = {
+    {128, 0  , 0  }, // Red
+    {128, 32 , 0  },
+    {128, 64 , 0  }, // Orange
+    {128, 96 , 0  },
+    {128, 128, 0  }, // Yellow
+    {96 , 128, 0  },
+    {64 , 128, 0  },
+    {32 , 128, 0  },
+    {0  , 128, 0  }, // Green
+    {0  , 128, 32 },
+    {0  , 128, 64 },
+    {0  , 128, 96 },
+    {0  , 128, 128}, // Cyan
+    {0  , 96 , 128},
+    {0  , 64 , 128},
+    {0  , 32 , 128},
+    {0  , 0  , 128}, // Blue
+    {32 , 0  , 128},
+    {64 , 0  , 128}, // Violet
+    {64 , 0  , 96 },
+    {96 , 0  , 64 },
+    {96 , 0  , 32 }
+};
+static led_strip_t *pStrip_a;
+const uint8_t led_count = 16;
+const uint8_t tail_len = 8;
+uint8_t led_color = 0;
+uint8_t led_tail = 0;
+uint8_t aR[8] = {0};
+uint8_t aG[8] = {0};
+uint8_t aB[8] = {0};
 
 static void blink_led(void)
 {
-    /* If the addressable LED is enabled */
-    if (s_led_state) {
-        /* Set the LED pixel using RGB from 0 (0%) to 255 (100%) for each color */
-        led_strip_set_pixel(led_strip, 0, 16, 16, 16);
-        /* Refresh the strip to send data */
-        led_strip_refresh(led_strip);
-    } else {
-        /* Set all LED off to clear all pixels */
-        led_strip_clear(led_strip);
+    uint8_t ix = 0, led_ix = 0;
+    uint8_t r = 0, g = 0, b = 0;
+    pStrip_a->clear(pStrip_a, 50);
+    for(ix = 0; ix < (tail_len + 1); ix++) {
+        led_ix = (led_tail + ix) % led_count;
+        if(ix == 0) {
+            pStrip_a->set_pixel(pStrip_a, led_ix, 0,  0, 0);
+        } else {
+            if(ix < tail_len) {
+                r = aR[ix] / (tail_len - ix);
+                g = aG[ix] / (tail_len - ix);
+                b = aB[ix] / (tail_len - ix);
+                aR[ix - 1] = aR[ix];
+                aG[ix - 1] = aG[ix];
+                aB[ix - 1] = aB[ix];
+            } else {
+                led_color++;
+                if(led_color > 21) led_color = 0;
+                aR[ix - 1] = palette[led_color][0];
+                aG[ix - 1] = palette[led_color][1];
+                aB[ix - 1] = palette[led_color][2];
+                r = aR[ix - 1];
+                g = aG[ix - 1];
+                b = aB[ix - 1];
+            }
+            pStrip_a->set_pixel(pStrip_a, led_ix, r,  g, b);
+            //ESP_LOGI(TAG, "Ix=%d [%d,%d,%d]", led_ix, r, g, b);
+        }
     }
+    ESP_LOGI(TAG, "Tail=%d, HeadIx=%d [%d,%d,%d]", led_tail, led_ix, r, g, b);
+    led_tail++;
+    if(led_tail >= led_count) led_tail = 0;
+    pStrip_a->refresh(pStrip_a, 100);
 }
 
 static void configure_led(void)
 {
     ESP_LOGI(TAG, "Example configured to blink addressable LED!");
     /* LED strip initialization with the GPIO and pixels number*/
-    led_strip_config_t strip_config = {
-        .strip_gpio_num = BLINK_GPIO,
-        .max_leds = 1, // at least one LED on board
-    };
-    led_strip_rmt_config_t rmt_config = {
-        .resolution_hz = 10 * 1000 * 1000, // 10MHz
-    };
-    ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_config, &rmt_config, &led_strip));
+    pStrip_a = led_strip_init(CONFIG_BLINK_LED_RMT_CHANNEL, BLINK_GPIO, led_count);
     /* Set all LED off to clear all pixels */
-    led_strip_clear(led_strip);
+    pStrip_a->clear(pStrip_a, 50);
 }
 
 #elif CONFIG_BLINK_LED_GPIO
@@ -72,36 +117,21 @@ static void configure_led(void)
     gpio_reset_pin(BLINK_GPIO);
     /* Set the GPIO as a push/pull output */
     gpio_set_direction(BLINK_GPIO, GPIO_MODE_OUTPUT);
-
-    uart_config_t uart_init;
-    int bs = ( 128 * 2 );
-    uart_driver_install(UART_NUM_0, bs, 0, 20, 0, 0);
 }
 
 #endif
 
 void app_main(void)
 {
-    int period = CONFIG_BLINK_PERIOD;
-    int dir = CONFIG_BLINK_STEP_PERIOD;
+
     /* Configure the peripheral according to the LED type */
     configure_led();
 
     while (1) {
-        ESP_LOGI(TAG, "Turning the LED %s! [%i]", s_led_state == true ? "ON" : "OFF", period);
+        // ESP_LOGI(TAG, "Turning the LED [pin:%d] %s!", BLINK_GPIO, s_led_state == true ? "ON" : "OFF");
         blink_led();
         /* Toggle the LED state */
         s_led_state = !s_led_state;
-        vTaskDelay(period / portTICK_PERIOD_MS);
-        if(s_led_state == 1) {
-            period += dir;
-            if(period > CONFIG_BLINK_MAX_PERIOD && dir > 0) {
-                dir = -CONFIG_BLINK_STEP_PERIOD;
-                period = CONFIG_BLINK_MAX_PERIOD;
-            } else if(period < CONFIG_BLINK_PERIOD && dir < 0) {
-                dir = CONFIG_BLINK_STEP_PERIOD;
-                period = CONFIG_BLINK_PERIOD;
-            }
-        }
+        vTaskDelay(50 / portTICK_PERIOD_MS);
     }
 }
